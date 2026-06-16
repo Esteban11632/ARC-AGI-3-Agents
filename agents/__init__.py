@@ -14,6 +14,7 @@ from .templates.openclaw_agent import OpenClaw
 from .templates.random_agent import Random
 from .templates.reasoning_agent import ReasoningAgent
 from .templates.smolagents import SmolCodingAgent, SmolVisionAgent
+from .templates.my_agent import MyAgent
 
 load_dotenv()
 
@@ -33,6 +34,7 @@ AVAILABLE_AGENTS["reasoningagent"] = ReasoningAgent
 __all__ = [
     "Swarm",
     "Random",
+    "MyAgent",
     "LangGraphFunc",
     "LangGraphTextOnly",
     "LangGraphThinking",
