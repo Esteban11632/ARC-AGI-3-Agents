@@ -1,8 +1,18 @@
 from dataclasses import dataclass
 from collections import deque
 import numpy as np
-import numpy as np
-import torch
+from enum import Enum
+
+from get_shapes import is_cross, is_l_shape, is_line, is_rectangle, is_square, is_t_shape
+
+class ShapeType(Enum):
+    UNKNOWN = 0
+    LINE = 1
+    SQUARE = 2
+    RECTANGLE = 3
+    L_SHAPE = 4
+    CROSS = 5
+    T_SHAPE = 6
 
 @dataclass
 class GridObject:
@@ -16,20 +26,16 @@ class GridObject:
     height: int
     area: int
     fill_ratio: float
-    is_single_cell: bool
-    is_line: bool
-    is_rectangle: bool
-    is_square: bool
-    shape_signature: tuple[tuple[int,int]]
     area_ratio: float
     is_large_region: bool
+    shape_type: ShapeType = ShapeType.UNKNOWN
     delta_x: int = 0
     delta_y: int = 0
     color_changed: bool = False
     rotation_delta: float = 0
     rotation_changed: bool = False
     position_changed: bool = False
-    matched: bool = False
+    matched: int = -1
 
 
 class ObjectExtractor:
@@ -118,14 +124,9 @@ class ObjectExtractor:
                 bbox_area = width * height
                 fill_ratio = area / bbox_area
 
-                is_single_cell = area == 1
-                is_line = width == 1 or height == 1
-                is_rectangle = area == bbox_area
-                is_square = is_rectangle and width == height
-                shape_sig = self.shape_signature(cells)
+                shape_type = self.get_shape_type(cells)
                 area_ratio = area / (self.grid_height * self.grid_width)
                 is_large_region = area_ratio > 0.35
-
                 obj = GridObject(
                         object_id=object_id,
                         color=color,
@@ -137,11 +138,7 @@ class ObjectExtractor:
                         height=height,
                         area=area,
                         fill_ratio=fill_ratio,
-                        is_single_cell=is_single_cell,
-                        is_line=is_line,
-                        is_rectangle=is_rectangle,
-                        is_square=is_square,
-                        shape_signature=shape_sig,
+                        shape_type=shape_type,
                         area_ratio=area_ratio,
                         is_large_region=is_large_region,
                     )
@@ -161,43 +158,68 @@ class ObjectExtractor:
         return center_row, center_col
     
     def normalize_cells(self, cells):
+        # Shifts the cells to the top-left corner so position on the grid doesn't matter
         min_r = min(r for r, _ in cells)
         min_c = min(c for _, c in cells)
 
-        normalized = [(r - min_r, c - min_c) for r, c in cells]
+        # Use a set to automatically remove duplicate coordinates if they exist
+        normalized = {(r - min_r, c - min_c) for r, c in cells}
         return tuple(sorted(normalized))
 
-
     def rotate_90(self, cells):
-        # rotate around origin: (r, c) -> (c, -r)
         return [(c, -r) for r, c in cells]
 
+    def abstract_shape_signature(self, obj):
+        shape_type = obj.shape_type
 
-    def shape_signature(self, cells):
-        # Step 1: normalize original cells
-        cells = list(self.normalize_cells(cells))
+        if shape_type == ShapeType.LINE:
+            return (ShapeType.LINE, obj.area)
 
-        versions = []
+        if shape_type == ShapeType.SQUARE:
+            return (ShapeType.SQUARE, obj.area)
 
-        current = cells
-        for _ in range(4):
-            normalized = self.normalize_cells(current)
-            versions.append(normalized)
-            current = self.rotate_90(current)
+        if shape_type == ShapeType.RECTANGLE:
+            return (ShapeType.RECTANGLE, min(obj.width, obj.height), max(obj.width, obj.height))
 
-        # Pick canonical version
-        return min(versions)
+        if shape_type == ShapeType.L_SHAPE:
+            return (ShapeType.L_SHAPE, obj.area)
+
+        if shape_type == ShapeType.CROSS:
+            return (ShapeType.CROSS, obj.area)
+
+        return (ShapeType.UNKNOWN, obj.area)
+
+    def get_shape_type(self, cells):
+        if is_line(cells):
+            return ShapeType.LINE
+
+        if is_square(cells):
+            return ShapeType.SQUARE
+
+        if is_rectangle(cells):
+            return ShapeType.RECTANGLE
+
+        if is_l_shape(cells):
+            return ShapeType.L_SHAPE
+
+        if is_cross(cells):
+            return ShapeType.CROSS
+
+        if is_t_shape(cells):
+            return ShapeType.T_SHAPE
+
+        return ShapeType.UNKNOWN
 
     def track_objects(self, max_distance=3):
         if len(self.frames) < 2:
             return
-        
+    
         current = self.frames[-1]
         previous = self.frames[-2]
         pairs = self.match_objects(current_frame=current, previous_frame=previous, max_distance=max_distance)
 
         for current_obj, previous_obj in pairs:
-            current_obj.matched = True
+            current_obj.matched = previous_obj.object_id
             self.get_movement(current_obj, previous_obj)
             self.get_previous_color(current_obj, previous_obj)
             current_obj.rotation_delta = self.rotation_delta(previous_obj.cells, current_obj.cells)
@@ -216,7 +238,7 @@ class ObjectExtractor:
                 if j in used_previous:
                     continue
 
-                if current_obj.shape_signature != previous_obj.shape_signature:
+                if self.abstract_shape_signature(current_obj) != self.abstract_shape_signature(previous_obj):
                     continue
 
                 delta_x = current_obj.center[0] - previous_obj.center[0]
@@ -260,65 +282,17 @@ class ObjectExtractor:
 
         return 0
 
-    def objects_to_model_input(self, objects):
-
-        features = []
-
-        for obj in objects:
-            min_row, min_col, max_row, max_col = obj.bbox
-
-            features.append([
-                            obj.color,
-
-                            # Normalized center (0 to 1)
-                            obj.center[0] / self.grid_height,
-                            obj.center[1] / self.grid_width,
-
-                            # Normalized bounding box (0 to 1)
-                            min_row / self.grid_height,
-                            min_col / self.grid_width,
-                            max_row / self.grid_height,
-                            max_col / self.grid_width,
-
-                            # Normalized width and height (0 to 1)
-                            obj.width / self.grid_width,
-                            obj.height / self.grid_height,
-
-                            # Normalized area (0 to 1)
-                            obj.area / (self.grid_height * self.grid_width),
-
-                            # Fraction of bbox occupied by object
-                            obj.fill_ratio,
-
-                            float(obj.is_single_cell),
-                            float(obj.is_line),
-                            float(obj.is_rectangle),
-                            float(obj.is_square),
-                            float(obj.area_ratio),
-                            float(obj.is_large_region),
-                            obj.delta_x / self.grid_height,
-                            obj.delta_y / self.grid_width,
-                            float(obj.color_changed),
-                            obj.rotation_delta / 360.0,
-                            float(obj.rotation_changed),
-                            float(obj.position_changed),
-                        ])
-
-        features = torch.tensor(features, dtype=torch.float32)
-
-        return features
-
-grid_before = [
-    [0, 2, 0, 0],
-    [0, 0, 2, 0],
+"""grid_before = [
+    [0, 2, 2, 2],
+    [0, 2, 2, 2],
     [0, 0, 0, 3],
     [3, 0, 0, 3],
 ]
 
 grid_after = [
-    [0, 0, 2, 0],
-    [0, 0, 2, 0],
-    [0, 0, 0, 3],
+    [0, 2, 2, 0],
+    [0, 2, 2, 0],
+    [0, 2, 2, 3],
     [3, 0, 0, 3],
 ]
 
@@ -327,9 +301,8 @@ extractor.extract(grid_before)
 extractor.extract(grid_after)
 extractor.track_objects()
 
-objects = extractor.frames[-1]
-features = extractor.objects_to_model_input(objects)
-print(features)
-for obj in objects:
-    print(obj)
-    print("--------------------------------")
+previous_objects = extractor.frames[-2]
+print(previous_objects[1])
+
+current_objects = extractor.frames[-1]
+print(current_objects[1])"""
