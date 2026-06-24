@@ -3,7 +3,14 @@ from collections import deque
 import numpy as np
 from enum import Enum
 
-from get_shapes import is_cross, is_l_shape, is_line, is_rectangle, is_square, is_t_shape
+from utils.get_shapes import (
+    is_cross, 
+    is_l_shape, 
+    is_line, 
+    is_rectangle, 
+    is_square, 
+    is_t_shape
+)
 
 class ShapeType(Enum):
     UNKNOWN = 0
@@ -41,6 +48,7 @@ class GridObject:
 class ObjectExtractor:
     def __init__(self, grid_height = 64, grid_width = 64):
         self.frames = []
+        self.grids = []
         self.grid_height = grid_height
         self.grid_width = grid_width
 
@@ -147,6 +155,7 @@ class ObjectExtractor:
                 object_id += 1
 
         self.frames.append(objects)
+        self.grids.append(grid.copy())
 
         return objects
     
@@ -216,7 +225,13 @@ class ObjectExtractor:
     
         current = self.frames[-1]
         previous = self.frames[-2]
-        pairs = self.match_objects(current_frame=current, previous_frame=previous, max_distance=max_distance)
+        pairs = self.match_objects(
+            current_frame=current,
+            previous_frame=previous,
+            max_distance=max_distance,
+            previous_grid=self.grids[-2],
+            current_grid=self.grids[-1],
+        )
 
         for current_obj, previous_obj in pairs:
             current_obj.matched = previous_obj.object_id
@@ -225,37 +240,71 @@ class ObjectExtractor:
             current_obj.rotation_delta = self.rotation_delta(previous_obj.cells, current_obj.cells)
             current_obj.rotation_changed = current_obj.rotation_delta != 0
         
-    def match_objects(self, current_frame, previous_frame, max_distance):
+    def _center_distance(self, a, b) -> float:
+        return abs(a.center[0] - b.center[0]) + abs(a.center[1] - b.center[1])
 
-        used_previous = set()
+    def _cells_overlap(self, a, b) -> bool:
+        return bool(set(a.cells) & set(b.cells))
+
+    def match_objects(
+        self,
+        current_frame,
+        previous_frame,
+        max_distance,
+        previous_grid=None,
+        current_grid=None,
+    ):
+        """Pair objects using shape + motion cues only (colors may change in-game)."""
+        grid_changed = (
+            previous_grid is None
+            or current_grid is None
+            or not np.array_equal(previous_grid, current_grid)
+        )
+
         matches = []
+        used_current = set()
+        used_previous = set()
 
-        for current_obj in current_frame:
-            best_prev = None
-            best_dist = float("inf")
+        def collect_candidates(movers_only: bool):
+            candidates = []
+            for ci, current_obj in enumerate(current_frame):
+                for pj, previous_obj in enumerate(previous_frame):
+                    if self.abstract_shape_signature(current_obj) != self.abstract_shape_signature(previous_obj):
+                        continue
 
-            for j, previous_obj in enumerate(previous_frame):
-                if j in used_previous:
+                    dist = self._center_distance(current_obj, previous_obj)
+                    if dist > max_distance:
+                        continue
+
+                    overlaps = self._cells_overlap(current_obj, previous_obj)
+                    if movers_only:
+                        if dist == 0 or overlaps:
+                            continue
+                    else:
+                        if ci in used_current or pj in used_previous:
+                            continue
+                        if not (dist == 0 or overlaps):
+                            continue
+                        candidates.append((dist, ci, pj))
+                        continue
+
+                    candidates.append((dist, ci, pj))
+            return candidates
+
+        if grid_changed:
+            for dist, ci, pj in sorted(collect_candidates(movers_only=True)):
+                if ci in used_current or pj in used_previous:
                     continue
+                matches.append((current_frame[ci], previous_frame[pj]))
+                used_current.add(ci)
+                used_previous.add(pj)
 
-                if self.abstract_shape_signature(current_obj) != self.abstract_shape_signature(previous_obj):
-                    continue
-
-                delta_x = current_obj.center[0] - previous_obj.center[0]
-                delta_y = current_obj.center[1] - previous_obj.center[1]
-
-                dist = abs(delta_x) + abs(delta_y)
-
-                if dist < best_dist and dist <= max_distance:
-                    best_dist = dist
-                    best_prev = j
-
-            if best_prev is not None:
-                previous_obj = previous_frame[best_prev]
-
-                matches.append((current_obj, previous_obj))
-
-                used_previous.add(best_prev)
+        for dist, ci, pj in sorted(collect_candidates(movers_only=False)):
+            if ci in used_current or pj in used_previous:
+                continue
+            matches.append((current_frame[ci], previous_frame[pj]))
+            used_current.add(ci)
+            used_previous.add(pj)
 
         return matches
     

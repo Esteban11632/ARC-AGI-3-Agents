@@ -1,7 +1,18 @@
+import sys
+from pathlib import Path
 import torch
 from stateBuilder import GameState
 from perceptron import ObjectExtractor
 from stateBuilder import StateBuilder
+
+_root = Path(__file__).parent.parent
+_data = Path(__file__).parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+if str(_data) not in sys.path:
+    sys.path.insert(0, str(_data))
+
+from utils.environment import get_adjacent_colors, ACTION_TO_DIRECTION
 
 class StateEncoder:
     def __init__(self, grid_height: int, grid_width: int):
@@ -68,6 +79,10 @@ class StateEncoder:
                             obj.rotation_delta / 360.0,
                             float(obj.rotation_changed),
                             float(obj.position_changed),
+                            float(get_adjacent_colors(obj.cells, state.grid, ACTION_TO_DIRECTION[1])),
+                            float(get_adjacent_colors(obj.cells, state.grid, ACTION_TO_DIRECTION[2])),
+                            float(get_adjacent_colors(obj.cells, state.grid, ACTION_TO_DIRECTION[3])),
+                            float(get_adjacent_colors(obj.cells, state.grid, ACTION_TO_DIRECTION[4])),
                         ])
 
         features = torch.tensor(features, dtype=torch.float32)
