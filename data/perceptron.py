@@ -251,55 +251,35 @@ class ObjectExtractor:
         current_frame,
         previous_frame,
         max_distance,
-        previous_grid=None,
-        current_grid=None,
     ):
-        """Pair objects using shape + motion cues only (colors may change in-game)."""
-        grid_changed = (
-            previous_grid is None
-            or current_grid is None
-            or not np.array_equal(previous_grid, current_grid)
-        )
+        """Pair objects using shape + motion cues (colors may change in-game).
+        
+        Color match is used as a tiebreaker: same-color pairs are preferred over
+        color-changed pairs at equal distance, but color never hard-blocks a match.
+        """
+        candidates = []
+        for ci, current_obj in enumerate(current_frame):
+            for pj, previous_obj in enumerate(previous_frame):
+                if self.abstract_shape_signature(current_obj) != self.abstract_shape_signature(previous_obj):
+                    continue
+
+                dist = self._center_distance(current_obj, previous_obj)
+                if dist > max_distance:
+                    continue
+
+                color_bonus = 0.5 if current_obj.color == previous_obj.color else 0
+                # A different-colored object at the exact same position is almost
+                # certainly a new/revealed tile, not the original object changing color.
+                # Penalize heavily so a moved-and-recolored object beats it.
+                same_pos_diff_color = dist == 0 and current_obj.color != previous_obj.color
+                score = dist - color_bonus + (max_distance + 1 if same_pos_diff_color else 0)
+                candidates.append((score, ci, pj))
 
         matches = []
         used_current = set()
         used_previous = set()
 
-        def collect_candidates(movers_only: bool):
-            candidates = []
-            for ci, current_obj in enumerate(current_frame):
-                for pj, previous_obj in enumerate(previous_frame):
-                    if self.abstract_shape_signature(current_obj) != self.abstract_shape_signature(previous_obj):
-                        continue
-
-                    dist = self._center_distance(current_obj, previous_obj)
-                    if dist > max_distance:
-                        continue
-
-                    overlaps = self._cells_overlap(current_obj, previous_obj)
-                    if movers_only:
-                        if dist == 0 or overlaps:
-                            continue
-                    else:
-                        if ci in used_current or pj in used_previous:
-                            continue
-                        if not (dist == 0 or overlaps):
-                            continue
-                        candidates.append((dist, ci, pj))
-                        continue
-
-                    candidates.append((dist, ci, pj))
-            return candidates
-
-        if grid_changed:
-            for dist, ci, pj in sorted(collect_candidates(movers_only=True)):
-                if ci in used_current or pj in used_previous:
-                    continue
-                matches.append((current_frame[ci], previous_frame[pj]))
-                used_current.add(ci)
-                used_previous.add(pj)
-
-        for dist, ci, pj in sorted(collect_candidates(movers_only=False)):
+        for score, ci, pj in sorted(candidates):
             if ci in used_current or pj in used_previous:
                 continue
             matches.append((current_frame[ci], previous_frame[pj]))
