@@ -139,6 +139,16 @@ class RuleEngine:
 
         return None
 
+    def _obj_profile(self, obj) -> tuple:
+        return (obj.shape_type, obj.area, obj.width, obj.height)
+
+    def _fact_identity(self, obj, actor) -> dict:
+        return {
+            "is_actor": obj is actor,
+            "obj_profile": self._obj_profile(obj),
+            "track_id": obj.matched if obj.matched != -1 else None,
+        }
+
     def analyze_transition(self, transition):
         state = transition.state
         next_state = transition.next_state
@@ -153,34 +163,47 @@ class RuleEngine:
         actor = self._get_actor(state, next_state, has_direction, dr, dc)
         self.last_actor = actor
 
-        if actor is not None:
-            obj = actor
+        for obj in next_state.objects:
+            if obj.is_large_region:
+                continue
             adj = get_adjacent_colors(obj.cells, state.grid, dr, dc) if has_direction else frozenset()
 
-            if obj.position_changed:
-                facts.append({
-                    "type": "movement",
-                    "action": action,
-                    "shape_type": obj.shape_type,
-                    "delta_x": obj.delta_x,
-                    "delta_y": obj.delta_y,
-                    "adj_colors": adj,
-                })
+            if obj is actor:
+                if obj.position_changed:
+                    facts.append({
+                        "type": "movement",
+                        "action": action,
+                        "delta_x": obj.delta_x,
+                        "delta_y": obj.delta_y,
+                        "adj_colors": adj,
+                        **self._fact_identity(obj, actor),
+                    })
 
-            elif obj.matched != -1 and has_direction:
-                facts.append({
-                    "type": "blocked",
-                    "action": action,
-                    "shape_type": obj.shape_type,
-                    "adj_colors": adj,
-                })
+                elif obj.matched != -1 and has_direction:
+                    facts.append({
+                        "type": "blocked",
+                        "action": action,
+                        "adj_colors": adj,
+                        **self._fact_identity(obj, actor),
+                    })
+            else:
+                if obj.position_changed:
+                    facts.append({
+                        "type": "movement",
+                        "action": action,
+                        "delta_x": obj.delta_x,
+                        "delta_y": obj.delta_y,
+                        "adj_colors": adj,
+                        **self._fact_identity(obj, actor),
+                    })
 
             if obj.color_changed:
                 facts.append({
                     "type": "color_change",
                     "action": action,
                     "from_color": obj.previous_color,
-                    "to_color": obj.color
+                    "to_color": obj.color,
+                    **self._fact_identity(obj, actor),
                 })
 
             if obj.rotation_changed:
@@ -193,53 +216,75 @@ class RuleEngine:
                     "action": action,
                     "from_rotation": prev_obj.rotation_delta if prev_obj else 0,
                     "to_rotation": obj.rotation_delta,
-                    "rotation_delta": obj.rotation_delta
+                    "rotation_delta": obj.rotation_delta,
+                    **self._fact_identity(obj, actor),
                 })
 
         if reward != 0:
             facts.append({
                 "type": "reward",
                 "action": action,
-                "reward": reward
+                "reward": reward,
+                **self._fact_identity(actor, actor),
             })
         
         self._update_hypotheses(facts)
         return facts
+
+    def _subject_key(self, fact) -> str:
+        if fact.get("is_actor"):
+            return "actor"
+        return f"obj={fact['obj_profile']}"
 
     def _update_hypotheses(self, facts):
         """Aggregates facts to separate deterministic rules from random occurrences."""
         for fact in facts:
             fact_type = fact["type"]
             action = fact["action"]
+            subject = self._subject_key(fact)
 
             if fact_type == "movement":
                 adj = tuple(sorted(fact["adj_colors"]))
-                key = f"WHEN action={action} AND adj={adj} THEN delta=({fact['delta_x']},{fact['delta_y']})"
+                if fact.get("is_actor"):
+                    key = (
+                        f"WHEN action={action} AND {subject} AND adj={adj} "
+                        f"THEN delta=({fact['delta_x']},{fact['delta_y']})"
+                    )
+                else:
+                    key = (
+                        f"WHEN action={action} AND {subject} "
+                        f"THEN delta=({fact['delta_x']},{fact['delta_y']})"
+                    )
                 value = (fact["delta_x"], fact["delta_y"])
                 self.hypotheses[key].append(value)
 
             elif fact_type == "blocked":
                 adj = tuple(sorted(fact["adj_colors"]))
-                key = f"WHEN action={action} AND adj={adj} THEN delta=(0,0)"
+                key = f"WHEN action={action} AND {subject} AND adj={adj} THEN delta=(0,0)"
                 value = (0, 0)
                 self.hypotheses[key].append(value)
 
             elif fact_type == "color_change":
-                key = f"WHEN action={action} AND initial_color={fact['from_color']} THEN color_shifts_to {fact['to_color']}"
+                key = (
+                    f"WHEN action={action} AND {subject} AND from_color={fact['from_color']} "
+                    f"THEN to_color={fact['to_color']}"
+                )
                 value = fact["to_color"]
                 self.hypotheses[key].append(value)
 
             elif fact_type == "rotation":
-                key = f"WHEN action={action} AND initial_rotation={fact['from_rotation']} THEN rotation_shifts_to {fact['to_rotation']}"
+                key = (
+                    f"WHEN action={action} AND {subject} AND from_rotation={fact['from_rotation']} "
+                    f"THEN to_rotation={fact['to_rotation']}"
+                )
                 value = fact["to_rotation"]
                 self.hypotheses[key].append(value)
 
             elif fact_type == "reward":
-                key = f"WHEN action={action} THEN receive_reward"
+                key = f"WHEN action={action} AND {subject} THEN receive_reward"
                 value = fact["reward"]
                 self.hypotheses[key].append(value)
 
-            # Evaluate if this hypothesis has become a stable rule
             self._evaluate_rule_certainty(key)
 
     def _evaluate_rule_certainty(self, key, threshold=3):

@@ -229,8 +229,6 @@ class ObjectExtractor:
             current_frame=current,
             previous_frame=previous,
             max_distance=max_distance,
-            previous_grid=self.grids[-2],
-            current_grid=self.grids[-1],
         )
 
         for current_obj, previous_obj in pairs:
