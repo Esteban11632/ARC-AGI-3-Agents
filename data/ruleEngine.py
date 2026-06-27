@@ -10,6 +10,13 @@ if str(_data) not in sys.path:
     sys.path.insert(0, str(_data))
 
 from utils.environment import get_adjacent_colors, ACTION_TO_DIRECTION
+from utils.rule_keys import (
+    delta_condition,
+    color_change_condition,
+    rotation_condition,
+    reward_condition,
+    format_rule,
+)
 
 
 class RuleEngine:
@@ -231,61 +238,45 @@ class RuleEngine:
         self._update_hypotheses(facts)
         return facts
 
-    def _subject_key(self, fact) -> str:
-        if fact.get("is_actor"):
-            return "actor"
-        return f"obj={fact['obj_profile']}"
-
     def _update_hypotheses(self, facts):
-        """Aggregates facts to separate deterministic rules from random occurrences."""
+        """Aggregates facts to separate deterministic rules from random occurrences.
+
+        Hypotheses are keyed by *condition* (a RuleCondition); the values are the
+        observed *outcomes*. This makes determinism detectable: one condition with
+        multiple distinct outcomes is stochastic, a single outcome is a rule.
+        """
         for fact in facts:
             fact_type = fact["type"]
             action = fact["action"]
-            subject = self._subject_key(fact)
+            is_actor = fact.get("is_actor", False)
+            obj_profile = fact.get("obj_profile")
 
-            if fact_type == "movement":
-                adj = tuple(sorted(fact["adj_colors"]))
-                if fact.get("is_actor"):
-                    key = (
-                        f"WHEN action={action} AND {subject} AND adj={adj} "
-                        f"THEN delta=({fact['delta_x']},{fact['delta_y']})"
-                    )
-                else:
-                    key = (
-                        f"WHEN action={action} AND {subject} "
-                        f"THEN delta=({fact['delta_x']},{fact['delta_y']})"
-                    )
-                value = (fact["delta_x"], fact["delta_y"])
-                self.hypotheses[key].append(value)
-
-            elif fact_type == "blocked":
-                adj = tuple(sorted(fact["adj_colors"]))
-                key = f"WHEN action={action} AND {subject} AND adj={adj} THEN delta=(0,0)"
-                value = (0, 0)
-                self.hypotheses[key].append(value)
+            if fact_type in ("movement", "blocked"):
+                cond = delta_condition(
+                    action, is_actor, adj=fact["adj_colors"], obj_profile=obj_profile,
+                )
+                outcome = (
+                    (fact["delta_x"], fact["delta_y"])
+                    if fact_type == "movement" else (0, 0)
+                )
 
             elif fact_type == "color_change":
-                key = (
-                    f"WHEN action={action} AND {subject} AND from_color={fact['from_color']} "
-                    f"THEN to_color={fact['to_color']}"
-                )
-                value = fact["to_color"]
-                self.hypotheses[key].append(value)
+                cond = color_change_condition(action, is_actor, fact["from_color"], obj_profile)
+                outcome = fact["to_color"]
 
             elif fact_type == "rotation":
-                key = (
-                    f"WHEN action={action} AND {subject} AND from_rotation={fact['from_rotation']} "
-                    f"THEN to_rotation={fact['to_rotation']}"
-                )
-                value = fact["to_rotation"]
-                self.hypotheses[key].append(value)
+                cond = rotation_condition(action, is_actor, fact["from_rotation"], obj_profile)
+                outcome = fact["to_rotation"]
 
             elif fact_type == "reward":
-                key = f"WHEN action={action} AND {subject} THEN receive_reward"
-                value = fact["reward"]
-                self.hypotheses[key].append(value)
+                cond = reward_condition(action, is_actor, obj_profile)
+                outcome = fact["reward"]
 
-            self._evaluate_rule_certainty(key)
+            else:
+                continue
+
+            self.hypotheses[cond].append(outcome)
+            self._evaluate_rule_certainty(cond)
 
     def _evaluate_rule_certainty(self, key, threshold=3):
         """Promotes a hypothesis to a confirmed rule if it always yields the same outcome."""
@@ -448,9 +439,9 @@ if __name__ == "__main__":
         
 
     print("\n=== Confirmed rules ===")
-    for key, value in rule_engine.get_rules().items():
-        print(f"  {key}  ->  {value}")
+    for cond, outcome in rule_engine.get_rules().items():
+        print(f"  {format_rule(cond, outcome)}")
 
     print("\n=== All hypotheses (sample) ===")
-    for key, values in list(rule_engine.hypotheses.items())[:10]:
-        print(f"  {key}: {values}")
+    for cond, values in list(rule_engine.hypotheses.items())[:10]:
+        print(f"  {cond}: {values}")
